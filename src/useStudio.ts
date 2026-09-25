@@ -3,15 +3,145 @@ import { sampleDocument } from './sample'
 import type { Cue, CueKind, FrozenVersion, PendingChange, Scene, StudioDocument, StudioState, WarningItem } from './types'
 
 const STORAGE_KEY = 'sologsb-1016-studio-v1'
+const PROJECT_SCOPE = '__project__'
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T
 const uid = (prefix: string) => `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
+const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
+
+/** Scenes (or project-level data) touched by a change, derived from its before/after snapshots. */
+function changeScope(change: PendingChange): Set<string> {
+  const scope = new Set<string>()
+  const beforeScenes = new Map(change.before.scenes.map((scene) => [scene.id, scene]))
+  const afterScenes = new Map(change.after.scenes.map((scene) => [scene.id, scene]))
+  for (const [id, scene] of beforeScenes) {
+    const after = afterScenes.get(id)
+    if (!after || !same(scene, after)) scope.add(id)
+  }
+  for (const id of afterScenes.keys()) {
+    if (!beforeScenes.has(id)) scope.add(id)
+  }
+  const orderChanged = change.before.scenes.map((scene) => scene.id).join('\0') !== change.after.scenes.map((scene) => scene.id).join('\0')
+  if (
+    orderChanged ||
+    change.before.title !== change.after.title ||
+    change.before.subtitle !== change.after.subtitle ||
+    change.before.targetDuration !== change.after.targetDuration ||
+    !same(change.before.characters, change.after.characters) ||
+    !same(change.before.soundEffects, change.after.soundEffects)
+  ) {
+    scope.add(PROJECT_SCOPE)
+  }
+  return scope
+}
+
+/** Human-readable labels for everything a change touches, used in confirmation dialogs. */
+function sceneCodesOf(change: PendingChange): string[] {
+  const labels: string[] = []
+  for (const id of changeScope(change)) {
+    if (id === PROJECT_SCOPE) {
+      labels.push('项目设置')
+      continue
+    }
+    const scene = change.after.scenes.find((item) => item.id === id) ?? change.before.scenes.find((item) => item.id === id)
+    labels.push(scene ? `${scene.code} ${scene.title}` : '已删除场次')
+  }
+  return labels
+}
+
+/** Restore only the fields that differ between before and after, leaving later edits to other fields intact. */
+function revertFields<T extends object>(current: T, before: T, after: T): T {
+  const next = { ...current }
+  for (const key of Object.keys(before) as Array<keyof T>) {
+    if (!same(before[key], after[key])) next[key] = before[key]
+  }
+  return next
+}
+
+/** Rebuild `current` so items listed in `referenceOrder` keep that relative order; other items stay in place. */
+function restoreRelativeOrder<T extends { id: string }>(current: T[], referenceOrder: string[]): T[] {
+  const referenced = new Set(referenceOrder)
+  const queue = referenceOrder.map((id) => current.find((item) => item.id === id)).filter((item): item is T => Boolean(item))
+  const result: T[] = []
+  let index = 0
+  for (const item of current) {
+    if (referenced.has(item.id) && index < queue.length) result.push(queue[index++])
+    else result.push(item)
+  }
+  while (index < queue.length) result.push(queue[index++])
+  return result
+}
+
+/**
+ * Undo one change's effect on a list of entities (scenes, cues, characters, sound effects):
+ * remove what it added, re-insert what it removed, revert the fields it touched and
+ * restore the relative order it changed — without disturbing other records' edits.
+ */
+function revertEntityList<T extends { id: string }>(
+  current: T[],
+  before: T[],
+  after: T[],
+  revertItem: (current: T, before: T, after: T) => T
+): T[] {
+  const beforeMap = new Map(before.map((item) => [item.id, item]))
+  const afterMap = new Map(after.map((item) => [item.id, item]))
+  let list = current.filter((item) => beforeMap.has(item.id) || !afterMap.has(item.id))
+  list = list.map((item) => {
+    const beforeItem = beforeMap.get(item.id)
+    const afterItem = afterMap.get(item.id)
+    if (!beforeItem || !afterItem || same(beforeItem, afterItem)) return item
+    return revertItem(item, beforeItem, afterItem)
+  })
+  before.forEach((beforeItem, index) => {
+    if (!afterMap.has(beforeItem.id) && !list.some((item) => item.id === beforeItem.id)) {
+      list.splice(Math.min(index, list.length), 0, clone(beforeItem))
+    }
+  })
+  const sharedBefore = before.filter((item) => afterMap.has(item.id)).map((item) => item.id)
+  const sharedAfter = after.filter((item) => beforeMap.has(item.id)).map((item) => item.id)
+  if (sharedBefore.join('\0') !== sharedAfter.join('\0')) {
+    list = restoreRelativeOrder(list, before.map((item) => item.id))
+  }
+  return list
+}
+
+function revertScene(current: Scene, before: Scene, after: Scene): Scene {
+  const next: Scene = { ...current, cues: revertEntityList(current.cues, before.cues, after.cues, revertFields) }
+  if (before.code !== after.code) next.code = before.code
+  if (before.title !== after.title) next.title = before.title
+  if (before.location !== after.location) next.location = before.location
+  if (before.timeOfDay !== after.timeOfDay) next.timeOfDay = before.timeOfDay
+  if (before.transition !== after.transition) next.transition = before.transition
+  if (before.durationLimit !== after.durationLimit) next.durationLimit = before.durationLimit
+  return next
+}
+
+/** Apply the inverse of a single change to the document, leaving every other change in place. */
+function applyInverse(change: PendingChange, document: StudioDocument) {
+  const { before, after } = change
+  if (before.title !== after.title) document.title = before.title
+  if (before.subtitle !== after.subtitle) document.subtitle = before.subtitle
+  if (before.targetDuration !== after.targetDuration) document.targetDuration = before.targetDuration
+  document.characters = revertEntityList(document.characters, before.characters, after.characters, revertFields)
+  document.soundEffects = revertEntityList(document.soundEffects, before.soundEffects, after.soundEffects, revertFields)
+  document.scenes = revertEntityList(document.scenes, before.scenes, after.scenes, revertScene)
+}
 
 function loadState(): StudioState {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (raw) {
       const parsed = JSON.parse(raw) as StudioState
-      if (parsed.document?.scenes?.length) return parsed
+      if (parsed.document?.scenes?.length) {
+        // Versions frozen before the snapshot manifest existed get empty defaults.
+        parsed.frozen = (parsed.frozen ?? []).map((version) => ({
+          ...version,
+          acceptedChanges: version.acceptedChanges ?? [],
+          checks: version.checks ?? [],
+          script: version.script ?? ''
+        }))
+        parsed.pending = parsed.pending ?? []
+        return parsed
+      }
     }
   } catch {
     // A corrupt local draft should not prevent access to the built-in example.
@@ -106,14 +236,26 @@ export function useStudio() {
     return result
   })
 
-  function persist() {
-    state.value.updatedAt = new Date().toISOString()
+  const errorWarnings = computed(() => warnings.value.filter((warning) => warning.level === 'error'))
+  const freezeBlockers = computed(() => ({
+    pending: pendingChanges.value,
+    errors: errorWarnings.value,
+    blocked: pendingChanges.value.length > 0 || errorWarnings.value.length > 0
+  }))
+
+  // Debounced write-only save; safe to call from the deep watcher because it never mutates state.
+  function scheduleSave() {
     saveState.value = 'saving'
     window.clearTimeout(saveTimer)
     saveTimer = window.setTimeout(() => {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(state.value))
       saveState.value = 'saved'
     }, 180)
+  }
+
+  function persist() {
+    state.value.updatedAt = new Date().toISOString()
+    scheduleSave()
   }
 
   function commit(label: string, mutator: (document: StudioDocument) => void, note = '') {
@@ -265,15 +407,31 @@ export function useStudio() {
     persist()
   }
 
+  /** Later records (newest-first list) that touch the same scenes or project data as this change. */
+  function affectedByReject(changeId: string): PendingChange[] {
+    const index = state.value.pending.findIndex((item) => item.id === changeId)
+    if (index < 0) return []
+    const scope = changeScope(state.value.pending[index])
+    if (!scope.size) return []
+    return state.value.pending.slice(0, index).filter((item) => {
+      if (item.status === 'rejected') return false
+      for (const id of changeScope(item)) {
+        if (scope.has(id)) return true
+      }
+      return false
+    })
+  }
+
   function rejectChange(changeId: string) {
-    const index = state.value.pending.findIndex((item) => item.id === changeId && item.status === 'pending')
-    if (index < 0) return
-    const change = state.value.pending[index]
+    const change = state.value.pending.find((item) => item.id === changeId && item.status === 'pending')
+    if (!change) return
     undoStack.value.push(clone(state.value.document))
-    state.value.document = clone(change.before)
-    for (let i = 0; i <= index; i += 1) {
-      if (state.value.pending[i].status === 'pending') state.value.pending[i].status = 'rejected'
-    }
+    if (undoStack.value.length > 60) undoStack.value.shift()
+    redoStack.value = []
+    const document = clone(state.value.document)
+    applyInverse(change, document)
+    state.value.document = document
+    change.status = 'rejected'
     persist()
   }
 
@@ -298,15 +456,65 @@ export function useStudio() {
     replaceDocument(next, '重做修改')
   }
 
-  function freeze(name: string): FrozenVersion {
+  function formatTimestamp(iso: string): string {
+    return new Date(iso).toLocaleString('zh-CN', { hour12: false })
+  }
+
+  /** Production script prefixed with the snapshot manifest: accepted changes and check results at freeze time. */
+  function buildVersionScript(version: FrozenVersion): string {
+    const lines = [
+      `${version.document.title}｜${version.name}`,
+      `冻结时间：${formatTimestamp(version.createdAt)}`,
+      `预计总时长：${version.totalDuration.toFixed(1)} 秒`,
+      '',
+      `本版包含的已接受修改（${version.acceptedChanges.length} 条）：`
+    ]
+    if (version.acceptedChanges.length) {
+      version.acceptedChanges.forEach((change, index) => {
+        lines.push(`${index + 1}. ${change.label}（${formatTimestamp(change.createdAt)}）${change.note ? `｜${change.note}` : ''}`)
+      })
+    } else {
+      lines.push('（无）')
+    }
+    lines.push('', `冻结时检查结果（${version.checks.length} 条）：`)
+    if (version.checks.length) {
+      for (const check of version.checks) {
+        lines.push(`- [${check.level === 'error' ? '错误' : '提醒'}] ${check.title}：${check.detail}`)
+      }
+    } else {
+      lines.push('（全部通过）')
+    }
+    lines.push('', '='.repeat(48), '')
+    lines.push(makeScript(version.document))
+    return lines.join('\n')
+  }
+
+  function freeze(name: string): FrozenVersion | undefined {
+    // Freezing is only allowed once every pending change is handled and no error-level check remains.
+    if (freezeBlockers.value.blocked) return undefined
     const version: FrozenVersion = {
       id: uid('version'),
       name: name.trim() || `制作稿 v${state.value.frozen.length + 1}`,
       createdAt: new Date().toISOString(),
       document: clone(state.value.document),
-      totalDuration: totalDuration.value
+      totalDuration: totalDuration.value,
+      acceptedChanges: state.value.pending
+        .filter((item) => item.status === 'accepted')
+        .reverse()
+        .map((item) => ({ id: item.id, label: item.label, note: item.note, createdAt: item.createdAt })),
+      checks: warnings.value.map((warning) => ({
+        type: warning.type,
+        level: warning.level,
+        sceneCode: state.value.document.scenes.find((scene) => scene.id === warning.sceneId)?.code ?? '',
+        title: warning.title,
+        detail: warning.detail
+      })),
+      script: ''
     }
+    version.script = buildVersionScript(version)
     state.value.frozen.unshift(version)
+    // Handled records are archived into this snapshot so the next version only lists what changed since.
+    state.value.pending = state.value.pending.filter((item) => item.status === 'pending')
     persist()
     return version
   }
@@ -345,7 +553,7 @@ export function useStudio() {
   }
 
   function downloadVersion(version: FrozenVersion) {
-    const blob = new Blob([makeScript(version.document)], { type: 'text/plain;charset=utf-8' })
+    const blob = new Blob([version.script || makeScript(version.document)], { type: 'text/plain;charset=utf-8' })
     const url = URL.createObjectURL(blob)
     const anchor = document.createElement('a')
     anchor.href = url
@@ -362,7 +570,7 @@ export function useStudio() {
     selectedSceneId.value = state.value.document.scenes[0]?.id ?? ''
   }
 
-  watch(state, persist, { deep: true })
+  watch(state, scheduleSave, { deep: true })
 
   return {
     state,
@@ -372,6 +580,8 @@ export function useStudio() {
     totalDuration,
     pendingChanges,
     warnings,
+    errorWarnings,
+    freezeBlockers,
     saveState,
     durationOfCue,
     durationOfScene,
@@ -386,6 +596,8 @@ export function useStudio() {
     moveScene,
     acceptChange,
     rejectChange,
+    affectedByReject,
+    sceneCodesOf,
     acceptAll,
     undo,
     redo,

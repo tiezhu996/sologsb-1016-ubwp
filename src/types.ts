@@ -58,12 +58,30 @@ export interface PendingChange {
   note: string
 }
 
+export interface FrozenChangeRecord {
+  id: string
+  label: string
+  note: string
+  createdAt: string
+}
+
+export interface FrozenCheckRecord {
+  type: WarningItem['type']
+  level: WarningItem['level']
+  sceneCode: string
+  title: string
+  detail: string
+}
+
 export interface FrozenVersion {
   id: string
   name: string
   createdAt: string
   document: StudioDocument
   totalDuration: number
+  acceptedChanges: FrozenChangeRecord[]
+  checks: FrozenCheckRecord[]
+  script: string
 }
 
 export interface StudioState {

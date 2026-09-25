@@ -85,15 +85,29 @@ h3 { margin: 3px 0 0; font-size: 21px; }
 .warning-title strong { font-size: 13px; }
 .warning-card p, .pending-card p { margin: 9px 0; color: #8996aa; font-size: 12px; line-height: 1.55; }
 .pending-toolbar { margin-bottom: 10px; }
-.pending-meta, .version-card { display: flex; justify-content: space-between; gap: 12px; }
+.pending-meta, .version-head { display: flex; justify-content: space-between; gap: 12px; }
 .pending-meta strong { font-size: 12px; }
 .pending-meta span, .version-card span, .version-card small { color: #707d93; font-size: 11px; }
 .pending-actions { display: flex; gap: 8px; margin-top: 11px; }
-.version-card { align-items: center; }
-.version-card > div { display: grid; gap: 4px; }
+.version-head { align-items: center; }
+.version-head > div { display: grid; gap: 4px; }
+.version-details { margin-top: 10px; padding-top: 9px; border-top: 1px dashed #293346; color: #8996aa; font-size: 12px; }
+.version-details summary { color: #9ba8bd; font-size: 12px; cursor: pointer; user-select: none; }
+.version-details ul { margin: 6px 0; padding-left: 18px; display: grid; gap: 4px; }
+.version-details p { margin: 6px 0; }
+.version-subheading { display: block; margin-top: 8px; color: #707d93; font-size: 11px; font-weight: 700; letter-spacing: .08em; }
 .dialog-card { width: min(460px, calc(100vw - 32px)); padding: 24px; border: 1px solid #2d394d; border-radius: 14px; background: #171e2c; box-shadow: 0 26px 80px rgba(0,0,0,.5); }
 .dialog-card h2 { margin: 7px 0 12px; }
 .dialog-card p { color: #8895aa; font-size: 13px; line-height: 1.6; }
+.dialog-card p.freeze-summary { padding: 9px 11px; border: 1px solid rgba(115, 218, 202, .3); border-radius: 8px; background: rgba(115, 218, 202, .07); color: #9fe8dd; font-size: 12px; }
+.dialog-alert { margin-bottom: 4px; }
+.blocker-section { margin-top: 14px; }
+.blocker-section h3 { margin: 0 0 8px; color: #eef4ff; font-size: 13px; }
+.dialog-list { margin: 0 0 12px; padding: 0; list-style: none; display: grid; gap: 8px; max-height: 220px; overflow-y: auto; }
+.dialog-list li { display: grid; gap: 3px; padding: 9px 11px; border: 1px solid #293346; border-radius: 8px; background: #131a27; font-size: 12px; }
+.dialog-list li strong { color: #dbe4f2; font-size: 12px; }
+.dialog-list li span { color: #7c8aa1; font-size: 11px; line-height: 1.5; }
+.dialog-list li .n-button { justify-self: start; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
 @media (max-width: 1180px) {
   .topbar { grid-template-columns: 190px 1fr; height: auto; }
