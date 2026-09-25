@@ -17,7 +17,7 @@ import {
   NTag
 } from 'naive-ui'
 import { useStudio } from './useStudio'
-import type { Cue, CueKind, Rate } from './types'
+import type { Cue, CueKind, FrozenVersion, PendingChange, Rate } from './types'
 
 const studio = useStudio()
 const {
@@ -41,11 +41,14 @@ const {
   moveScene,
   acceptChange,
   rejectChange,
+  previewReject,
   acceptAll,
   undo,
   redo,
   freeze,
+  freezeBlockers,
   downloadVersion,
+  makeScript,
   resetSample
 } = studio
 
@@ -53,6 +56,10 @@ const dragCueId = ref('')
 const showFreezeModal = ref(false)
 const freezeName = ref('')
 const activeRightTab = ref('warnings')
+const rejectingChange = ref<PendingChange | null>(null)
+const rejectImpact = ref<PendingChange[]>([])
+const snapshotVersion = ref<FrozenVersion | null>(null)
+const showFreezeBlockedModal = ref(false)
 
 const kindOptions = [
   { label: '台词', value: 'dialogue' },
@@ -120,14 +127,73 @@ function changeCueKind(cue: Cue, kind: CueKind) {
 }
 
 function openFreeze() {
+  // 有待确认修改或错误级检查项时先挡住，由导演逐条处理后再冻结。
+  if (freezeBlockers.value.pending.length || freezeBlockers.value.errors.length) {
+    showFreezeBlockedModal.value = true
+    return
+  }
   freezeName.value = `制作稿 v${state.value.frozen.length + 1}`
   showFreezeModal.value = true
 }
 
+function goBlockedPending() {
+  showFreezeBlockedModal.value = false
+  activeRightTab.value = 'pending'
+}
+
+function goBlockedErrors() {
+  showFreezeBlockedModal.value = false
+  activeRightTab.value = 'warnings'
+}
+
 function confirmFreeze() {
+  if (freezeBlockers.value.pending.length || freezeBlockers.value.errors.length) {
+    showFreezeModal.value = false
+    return
+  }
   const version = freeze(freezeName.value)
   showFreezeModal.value = false
   downloadVersion(version)
+}
+
+function requestReject(change: PendingChange) {
+  const affected = previewReject(change.id)
+  // 同一场次还有后续待确认改动时，先列出受影响记录，由导演确认后再退回。
+  if (affected.length) {
+    rejectingChange.value = change
+    rejectImpact.value = affected
+  } else {
+    rejectChange(change.id)
+  }
+}
+
+function confirmReject() {
+  if (rejectingChange.value) rejectChange(rejectingChange.value.id)
+  rejectingChange.value = null
+  rejectImpact.value = []
+}
+
+function cancelReject() {
+  rejectingChange.value = null
+  rejectImpact.value = []
+}
+
+function showSnapshot(version: FrozenVersion) {
+  snapshotVersion.value = version
+}
+
+function changeSceneCodes(change: PendingChange): string {
+  const ids = change.scope?.sceneIds ?? []
+  if (change.scope?.project) return '项目级'
+  if (!ids.length) return ''
+  const codes = ids
+    .map((id) => state.value.document.scenes.find((scene) => scene.id === id)?.code)
+    .filter(Boolean)
+  return codes.join('、')
+}
+
+function errorSceneCode(sceneId: string): string {
+  return state.value.document.scenes.find((scene) => scene.id === sceneId)?.code ?? ''
 }
 
 function onKeydown(event: KeyboardEvent) {
@@ -364,7 +430,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
 
             <n-tab-pane name="pending" :tab="`待确认 ${pendingCount}`">
               <div class="pending-toolbar">
-                <n-alert type="info" :show-icon="false">每次编辑都会形成草稿记录。退回较早记录时，其上方尚未确认的草稿会一并撤销。</n-alert>
+                <n-alert type="info" :show-icon="false">接受或退回只处理当前这条，不会连带撤掉别的修改；同一场次还有更晚的改动时，退回前会先列出受影响记录。</n-alert>
               </div>
               <div class="review-list">
                 <div v-for="change in state.pending.filter((item) => item.status === 'pending')" :key="change.id" class="pending-card">
@@ -373,9 +439,10 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
                     <span>{{ new Date(change.createdAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) }}</span>
                   </div>
                   <p v-if="change.note">{{ change.note }}</p>
+                  <small v-if="changeSceneCodes(change)" class="pending-scope">涉及场次：{{ changeSceneCodes(change) }}</small>
                   <div class="pending-actions">
                     <n-button size="small" type="primary" @click="acceptChange(change.id)">接受</n-button>
-                    <n-button size="small" tertiary type="warning" @click="rejectChange(change.id)">退回</n-button>
+                    <n-button size="small" tertiary type="warning" @click="requestReject(change)">退回</n-button>
                   </div>
                 </div>
                 <n-empty v-if="!pendingCount" description="所有修改都已确认" />
@@ -388,11 +455,12 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
                   <div>
                     <strong>{{ version.name }}</strong>
                     <span>{{ new Date(version.createdAt).toLocaleString('zh-CN') }}</span>
-                    <small>{{ version.document.scenes.length }} 场 · {{ version.totalDuration.toFixed(1) }} 秒</small>
+                    <small>{{ version.document.scenes.length }} 场 · {{ version.totalDuration.toFixed(1) }} 秒 · 本版含 {{ version.acceptedChanges?.length ?? 0 }} 条已接受修改 · 检查 {{ version.checks?.length ?? 0 }}</small>
+                    <n-button size="tiny" quaternary @click="showSnapshot(version)">查看快照内容</n-button>
                   </div>
                   <n-button size="small" type="primary" secondary @click="downloadVersion(version)">导出稿</n-button>
                 </div>
-                <n-empty v-if="!state.frozen.length" description="冻结后生成只读制作稿" />
+                <n-empty v-if="!state.frozen.length" description="待确认项与错误检查全部处理完后，才能冻结制作稿" />
               </div>
             </n-tab-pane>
           </n-tabs>
@@ -404,12 +472,113 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
       <div class="dialog-card">
         <span class="eyebrow">FREEZE VERSION</span>
         <h2>冻结当前版本</h2>
-        <p>冻结会保存一份不可变快照，并立即下载纯文本制作稿。当前草稿仍可继续编辑。</p>
+        <p>全部待确认修改与错误检查均已处理。冻结会保存不可变快照（含本版接受的修改、检查结果与制作稿），并立即下载纯文本制作稿；当前草稿仍可继续编辑。</p>
+        <ul class="snapshot-summary">
+          <li>本版收录已接受修改：<strong>{{ state.pending.filter((item) => item.status === 'accepted' && !item.frozenInVersionId).length }}</strong> 条</li>
+          <li>剩余检查项：<strong>{{ warnings.length }}</strong> 条（警告级不拦截冻结，会一并写入快照）</li>
+        </ul>
         <n-input v-model:value="freezeName" placeholder="版本名称" @keyup.enter="confirmFreeze" />
         <div class="dialog-actions">
           <n-button @click="showFreezeModal = false">取消</n-button>
           <n-button type="primary" @click="confirmFreeze">冻结并导出</n-button>
         </div>
+      </div>
+    </n-modal>
+
+    <n-modal v-model:show="showFreezeBlockedModal">
+      <div class="dialog-card wider">
+        <span class="eyebrow">FREEZE BLOCKED</span>
+        <h2>暂时不能冻结</h2>
+        <p>制作稿发出前需要先处理完以下内容，逐条接受或退回、修掉错误后再来冻结。</p>
+        <div v-if="freezeBlockers.pending.length" class="block-group">
+          <div class="block-group-head">
+            <n-tag size="small" type="warning" :bordered="false">待确认修改</n-tag>
+            <strong>{{ freezeBlockers.pending.length }} 条</strong>
+            <n-button size="tiny" quaternary @click="goBlockedPending">去处理</n-button>
+          </div>
+          <ul class="block-list">
+            <li v-for="change in freezeBlockers.pending" :key="change.id">
+              <span>{{ change.label }}</span>
+              <small>{{ changeSceneCodes(change) || '项目级' }}</small>
+            </li>
+          </ul>
+        </div>
+        <div v-if="freezeBlockers.errors.length" class="block-group">
+          <div class="block-group-head">
+            <n-tag size="small" type="error" :bordered="false">错误检查</n-tag>
+            <strong>{{ freezeBlockers.errors.length }} 条</strong>
+            <n-button size="tiny" quaternary @click="goBlockedErrors">去处理</n-button>
+          </div>
+          <ul class="block-list">
+            <li v-for="warning in freezeBlockers.errors" :key="warning.id">
+              <span>{{ warning.title }}</span>
+              <small>{{ errorSceneCode(warning.sceneId) }}</small>
+            </li>
+          </ul>
+        </div>
+        <div class="dialog-actions">
+          <n-button type="primary" @click="showFreezeBlockedModal = false">知道了</n-button>
+        </div>
+      </div>
+    </n-modal>
+
+    <n-modal :show="!!rejectingChange" @update:show="(value: boolean) => !value && cancelReject()">
+      <div class="dialog-card wider">
+        <span class="eyebrow">REJECT CHANGE</span>
+        <h2>确认退回这条修改</h2>
+        <p v-if="rejectingChange">「{{ rejectingChange.label }}」所在场次还有 {{ rejectImpact.length }} 条更晚的待确认改动，退回只作用于当前这条；已经被下面这些改动覆盖的内容会保留后续值，不会连带撤掉它们。</p>
+        <ul class="block-list impact-list">
+          <li v-for="change in rejectImpact" :key="change.id">
+            <span>{{ change.label }}</span>
+            <small>{{ new Date(change.createdAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) }} · {{ changeSceneCodes(change) || '项目级' }}</small>
+          </li>
+        </ul>
+        <div class="dialog-actions">
+          <n-button @click="cancelReject">取消</n-button>
+          <n-button type="warning" @click="confirmReject">仅退回当前这条</n-button>
+        </div>
+      </div>
+    </n-modal>
+
+    <n-modal :show="!!snapshotVersion" @update:show="(value: boolean) => !value && (snapshotVersion = null)">
+      <div class="dialog-card wide">
+        <template v-if="snapshotVersion">
+          <span class="eyebrow">FROZEN SNAPSHOT</span>
+          <h2>{{ snapshotVersion.name }}</h2>
+          <p>{{ new Date(snapshotVersion.createdAt).toLocaleString('zh-CN') }} · {{ snapshotVersion.document.scenes.length }} 场 · {{ snapshotVersion.totalDuration.toFixed(1) }} 秒</p>
+
+          <div class="snapshot-section">
+            <strong>随版接受的修改（{{ snapshotVersion.acceptedChanges?.length ?? 0 }}）</strong>
+            <ul class="block-list">
+              <li v-for="change in snapshotVersion.acceptedChanges ?? []" :key="change.id">
+                <span>{{ change.label }}</span>
+                <small>{{ new Date(change.acceptedAt).toLocaleString('zh-CN') }} 接受</small>
+              </li>
+            </ul>
+            <small v-if="!(snapshotVersion.acceptedChanges?.length)" class="snapshot-empty">本版没有新增接受的修改。</small>
+          </div>
+
+          <div class="snapshot-section">
+            <strong>检查结果（{{ snapshotVersion.checks?.length ?? 0 }}）</strong>
+            <ul class="block-list">
+              <li v-for="check in snapshotVersion.checks ?? []" :key="check.id" :class="check.level">
+                <n-tag size="tiny" :type="check.level === 'error' ? 'error' : 'warning'" :bordered="false">{{ check.level === 'error' ? '错误' : '警告' }}</n-tag>
+                <span>{{ check.title }}：{{ check.detail }}</span>
+              </li>
+            </ul>
+            <small v-if="!(snapshotVersion.checks?.length)" class="snapshot-empty">冻结时没有检查问题。</small>
+          </div>
+
+          <div class="snapshot-section">
+            <strong>制作稿</strong>
+            <pre class="script-preview">{{ snapshotVersion.script ?? makeScript(snapshotVersion.document) }}</pre>
+          </div>
+
+          <div class="dialog-actions">
+            <n-button @click="snapshotVersion = null">关闭</n-button>
+            <n-button type="primary" @click="downloadVersion(snapshotVersion)">重新导出制作稿</n-button>
+          </div>
+        </template>
       </div>
     </n-modal>
   </n-config-provider>

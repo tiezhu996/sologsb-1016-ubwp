@@ -48,14 +48,62 @@ export interface StudioDocument {
   scenes: Scene[]
 }
 
+export type FieldDiffKind = 'project' | 'scene' | 'cue' | 'cue-order'
+
+export interface FieldDiff {
+  kind: FieldDiffKind
+  sceneId?: string
+  cueId?: string
+  field?: string
+  before: unknown
+  after: unknown
+}
+
+export interface StructuralOp {
+  type: 'add-cue' | 'delete-cue' | 'add-scene' | 'delete-scene'
+  sceneId?: string
+  cueId?: string
+  index: number
+  snapshot?: unknown
+}
+
+export interface ChangeScope {
+  project: boolean
+  sceneIds: string[]
+  cueIds: string[]
+}
+
 export interface PendingChange {
   id: string
   label: string
+  note: string
   createdAt: string
   status: 'pending' | 'accepted' | 'rejected'
   before: StudioDocument
   after: StudioDocument
+  scope: ChangeScope
+  diffs: FieldDiff[]
+  ops: StructuralOp[]
+  acceptedAt?: string
+  rejectedAt?: string
+  frozenInVersionId?: string
+}
+
+export interface SnapshotCheck {
+  id: string
+  type: WarningItem['type']
+  level: WarningItem['level']
+  sceneCode: string
+  title: string
+  detail: string
+}
+
+export interface SnapshotChange {
+  id: string
+  label: string
   note: string
+  createdAt: string
+  acceptedAt: string
 }
 
 export interface FrozenVersion {
@@ -63,7 +111,10 @@ export interface FrozenVersion {
   name: string
   createdAt: string
   document: StudioDocument
+  script: string
   totalDuration: number
+  acceptedChanges: SnapshotChange[]
+  checks: SnapshotCheck[]
 }
 
 export interface StudioState {
